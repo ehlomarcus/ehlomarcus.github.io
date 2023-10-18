@@ -1,0 +1,166 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta http-equiv=x-ua-compatible content="ie=edge"><title>Using Grafana Agent to proxy AWS Kinesis Data Firehose in to Grafana Loki - ehlomarcus.github.io</title><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href=https://ehlomarcus.github.io/favicon.png><link rel=canonical href=https://ehlomarcus.github.io/posts/kinesis-grafana-agent-loki/><link rel=stylesheet href=/css/style.min.af5a6ec48e6cb036c36307baa99c73c614550f2720868dd6a375d1ecf6968ac8.css><link rel=stylesheet href=/assets/css/extended.min.9729f28a5087b689b946e103d96abd63bfd37b1417effa251dbf798312e3fba5.css><meta name=description content="Experiment with Grafana Agent to get Fargate pod logs in to Grafana Loki using Kinesis Data Firehose."><meta property="og:title" content="Using Grafana Agent to proxy AWS Kinesis Data Firehose in to Grafana Loki"><meta property="og:type" content="website"><meta property="og:url" content="https://ehlomarcus.github.io/posts/kinesis-grafana-agent-loki/"><meta property="og:description" content="Experiment with Grafana Agent to get Fargate pod logs in to Grafana Loki using Kinesis Data Firehose."><meta name=twitter:card content="summary"><meta name=twitter:site content="@ehlomarcus"><meta name=twitter:creator content="@ehlomarcus"><link rel=preconnect href=https://fonts.gstatic.com><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;700&amp;display=swap" rel=stylesheet></head><body class='page frame page-blog-single'><div id=menu-main-mobile class=menu-main-mobile><ul class=menu><li class=menu-item-home><a href=https://ehlomarcus.github.io/>Home</a></li><li class=menu-item-blog><a href=https://ehlomarcus.github.io/posts/>Blog</a></li><li class=menu-item-about><a href=https://ehlomarcus.github.io/pages/about/>About</a></li><li class=menu-item-tags><a href=https://ehlomarcus.github.io/tags/>Tags</a></li></ul></div><div id=wrapper class=wrapper><div class=header><a class=header-logo href=/>ehlomarcus.github.io</a><div class=menu-main><ul><li class=menu-item-home><a href=/><span>Home</span></a></li><li class=menu-item-blog><a href=/posts/><span>Blog</span></a></li><li class=menu-item-about><a href=/pages/about/><span>About</span></a></li><li class=menu-item-tags><a href=/tags/><span>Tags</span></a></li></ul></div><div id=toggle-menu-main-mobile class=hamburger-trigger><button class=hamburger>Menu</button></div></div><div class=blog><div class=intro><h1>Using Grafana Agent to proxy AWS Kinesis Data Firehose in to Grafana Loki<span class=dot>.</span></h1></div><div class=content><p>Running workloads on AWS EKS with EC2 instances is straightforward and something that you just do with out thinking much about it. Now if you switch to use Fargate, then there is a whole set of other things you need to think about and skills to pick up.</p><p>One of those things is logging. So I&rsquo;ve been experimenting with Kinesis Data Firehose and Grafana Agent, to get a flow of logs in to Grafana Loki. Which is what this post will be all about.</p><h2 id=getting-grafana-agent-up-and-running>Getting Grafana Agent up and running</h2><p>I started off by using Grafanas own instructions for how to <a href=https://grafana.com/docs/agent/latest/flow/setup/install/kubernetes/>deploy agent in flow mode</a>.</p><p>But running <em>helm install</em> won&rsquo;t get you far. So lets take a look at the values I used.</p><h3 id=the-values>The values</h3><p>Agent will take a stream of batched logs from <em>Firehose</em> so we will use a standard deployment instead of daemonset.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>controller</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>type</span><span class=p>:</span><span class=w> </span><span class=l>deployment</span><span class=w>
+</span></span></span></code></pre></div><p>The <code>awsfirehose</code> receiver will be setup to listen on a specific port so we will add that as an extra port to deployment.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>agent</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>extraPorts</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>   </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;faro&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>     </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>12347</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>     </span><span class=nt>targetPort</span><span class=p>:</span><span class=w> </span><span class=m>12347</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>     </span><span class=nt>protocol</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;TCP&#34;</span><span class=w>
+</span></span></span></code></pre></div><blockquote><p>name: &ldquo;faro&rdquo; is what is defined as port name in the ingress. So we use the same here.</p></blockquote><p>Next is ingress. Here I used <em>aws-load-balancer-controller</em> annotations to get the functionallity I needed.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>ingress</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>annotations</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/backend-protocol</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;HTTP&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/certificate-arn</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;arn:aws:acm:&lt;region&gt;:&lt;account_id&gt;:certificate/&lt;certificate_id&gt;&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/healthcheck-port</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;80&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/listen-ports</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;[{&#34;HTTPS&#34;: 443}]&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/scheme</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;internet-facing&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/ssl-redirect</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;443&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/target-type</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;ip&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/actions.grafana-agent</span><span class=p>:</span><span class=w> </span><span class=p>&gt;</span><span class=sd>
+</span></span></span><span class=line><span class=cl><span class=sd>      {&#34;type&#34;:&#34;forward&#34;,&#34;forwardConfig&#34;:{&#34;targetGroups&#34;:[{&#34;serviceName&#34;:&#34;grafana-agent&#34;,&#34;servicePort&#34;:&#34;12347&#34;,&#34;weight&#34;:1}]}}</span><span class=w>      
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>alb.ingress.kubernetes.io/conditions.grafana-agent</span><span class=p>:</span><span class=w> </span><span class=p>&gt;</span><span class=sd>
+</span></span></span><span class=line><span class=cl><span class=sd>      [{&#34;field&#34;:&#34;http-header&#34;,&#34;httpHeaderConfig&#34;:{&#34;httpHeaderName&#34;: &#34;X-Amz-Firehose-Access-Key&#34;, &#34;values&#34;:[&#34;a-really-long-and-scret-header-value&#34;]}}]</span><span class=w>      
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>external-dns.alpha.kubernetes.io/hostname</span><span class=p>:</span><span class=w> </span><span class=l>grafana-agent.example.domain.com</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>enabled</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>hosts</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- <span class=l>grafana-agent.example.domain.com</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>path</span><span class=p>:</span><span class=w> </span><span class=l>/*</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>pathType</span><span class=p>:</span><span class=w> </span><span class=l>ImplementationSpecific</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>ingressClassName</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;alb&#34;</span><span class=w>
+</span></span></span></code></pre></div><p>The most noticeable configurations are the <code>alb.ingress.kubernetes.io/actions.agent-grafana-agent</code> and <code>alb.ingress.kubernetes.io/conditions.agent-grafana-agent</code> annotations.</p><p>They will setup forward rules to the correct kubernetes service name, but also require that a specific header (<strong>X-Amz-Firehose-Access-Key</strong>) is present on each request. Requests without it won&rsquo;t be forwarded.</p><p>Other security measuers could be taken, but this was the easiest one to implement. The header, <strong>X-Amz-Firehose-Access-Key</strong>, is already something that <em>Kinesis Data Firehose</em> uses when communicating with other third parties. I also tried to use Security Group and defining <a href=https://docs.aws.amazon.com/firehose/latest/dev/controlling-access.html#using-iam-splunk>CIDR ranges</a>, but those did not seem to work when using an http-endpoint configuration in <em>Firehose</em>.</p><p>Final piece is the <em>configmap</em> with the Grafana Agent river configuration.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>agent</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>configMap</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>content</span><span class=p>:</span><span class=w> </span><span class=p>|</span><span class=sd>
+</span></span></span><span class=line><span class=cl><span class=sd>      loki.source.awsfirehose &#34;loki_fh_receiver&#34; {
+</span></span></span><span class=line><span class=cl><span class=sd>        http {
+</span></span></span><span class=line><span class=cl><span class=sd>          listen_address = &#34;0.0.0.0&#34;
+</span></span></span><span class=line><span class=cl><span class=sd>          listen_port    = 12347
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>        forward_to = [
+</span></span></span><span class=line><span class=cl><span class=sd>          loki.process.process_firehose.receiver,
+</span></span></span><span class=line><span class=cl><span class=sd>        ]
+</span></span></span><span class=line><span class=cl><span class=sd>      }
+</span></span></span><span class=line><span class=cl><span class=sd>      loki.process &#34;process_firehose&#34; {
+</span></span></span><span class=line><span class=cl><span class=sd>        forward_to = [
+</span></span></span><span class=line><span class=cl><span class=sd>          loki.write.local.receiver,
+</span></span></span><span class=line><span class=cl><span class=sd>        ]
+</span></span></span><span class=line><span class=cl><span class=sd>        stage.json {
+</span></span></span><span class=line><span class=cl><span class=sd>          expressions = {log = &#34;&#34;, kubernetes = &#34;&#34;}
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>        stage.json {
+</span></span></span><span class=line><span class=cl><span class=sd>          source      = &#34;kubernetes&#34;
+</span></span></span><span class=line><span class=cl><span class=sd>          expressions = {pod = &#34;pod_name&#34;, namespace = &#34;namespace_name&#34;, container = &#34;container_name&#34;, labels = &#34;&#34;}
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>        stage.static_labels {
+</span></span></span><span class=line><span class=cl><span class=sd>          values = {
+</span></span></span><span class=line><span class=cl><span class=sd>            cluster = &#34;my-cluster&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            environment = &#34;testing&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            region = &#34;&lt;region&gt;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>          }
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>        stage.labels {
+</span></span></span><span class=line><span class=cl><span class=sd>          values = {
+</span></span></span><span class=line><span class=cl><span class=sd>            pod = &#34;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            namespace = &#34;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            container = &#34;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            app = &#34;labels.\&#34;app.kubernetes.io/name\&#34;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            instance = &#34;labels.\&#34;app.kubernetes.io/instance\&#34;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>            component = &#34;labels.\&#34;app.kubernetes.io/component\&#34;&#34;,
+</span></span></span><span class=line><span class=cl><span class=sd>          }
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>        stage.output {
+</span></span></span><span class=line><span class=cl><span class=sd>          source = &#34;log&#34;
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>      }
+</span></span></span><span class=line><span class=cl><span class=sd>      loki.write &#34;local&#34; {
+</span></span></span><span class=line><span class=cl><span class=sd>        endpoint {
+</span></span></span><span class=line><span class=cl><span class=sd>          url       = &#34;http://loki-write.loki.svc.cluster.local:3100/loki/api/v1/push&#34;
+</span></span></span><span class=line><span class=cl><span class=sd>          tenant_id = &#34;meta-monitoring&#34;
+</span></span></span><span class=line><span class=cl><span class=sd>        }
+</span></span></span><span class=line><span class=cl><span class=sd>      }</span><span class=w>      
+</span></span></span></code></pre></div><h4 id=breakdown-of-river-configuration>Breakdown of river configuration</h4><p><code>loki.source.awsfirehose "loki_fh_receiver" {}</code></p><p>This setup a listener for <em>awsfirehose</em> with a port and then forward to the <em>loki.process</em> step.</p><p><code>loki.process "process_firehose" {}</code></p><p>The process step will use <code>json</code> stage to be able to parse the batched logs coming in.</p><p>Next <code>json</code> stage will parse the <code>kubernetes</code> block of the <em>Firehose</em> message.</p><p>Then add some static labels. And then define then dynamic labels and from where the values are coming from. The hardest part whas figuring out how to get <em>dot</em> and <em>/</em> notated keys from the <code>labels</code> (which come from <code>stage.json {source="kubernetes"}</code>).</p><p>The final stage is to output which part of the original <em>Firehose</em> message that contained the actual log message.</p><p>All processing is now done and <code>loki.write "local" {}</code> will push the logs to <strong>Loki</strong>.</p><p>With Grafana Agent deployed we will take a look at the <em>Firehose</em> setup.</p><h2 id=firehose-and-fluentbit>Firehose and FluentBit</h2><p>Setup of Firehose and getting data in to it is fairly simple. Use your prefered IaC tool to setup the needed resources.</p><p>I used <em>terraform</em> to create the needed resources.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-hcl data-lang=hcl><span class=line><span class=cl><span class=k>resource</span> <span class=s2>&#34;aws_s3_bucket&#34; &#34;this&#34;</span> {
+</span></span><span class=line><span class=cl><span class=n>  bucket</span> <span class=o>=</span> <span class=s2>&#34;firehose&#34;</span>
+</span></span><span class=line><span class=cl>}
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>resource</span> <span class=s2>&#34;aws_kinesis_firehose_delivery_stream&#34; &#34;this&#34;</span> {
+</span></span><span class=line><span class=cl><span class=n>  name</span>        <span class=o>=</span> <span class=s2>&#34;grafana-agent&#34;</span>
+</span></span><span class=line><span class=cl><span class=n>  destination</span> <span class=o>=</span> <span class=s2>&#34;http_endpoint&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>  <span class=k>http_endpoint_configuration</span> {
+</span></span><span class=line><span class=cl><span class=n>    url</span>                <span class=o>=</span> <span class=s2>&#34;https://grafana-agent.ingress.fqdn&#34;</span>
+</span></span><span class=line><span class=cl><span class=n>    name</span>               <span class=o>=</span> <span class=s2>&#34;http-endpoint&#34;</span>
+</span></span><span class=line><span class=cl><span class=n>    role_arn</span>           <span class=o>=</span> <span class=k>aws_iam_role</span><span class=p>.</span><span class=k>this</span><span class=p>.</span><span class=k>arn</span>
+</span></span><span class=line><span class=cl><span class=n>    s3_backup_mode</span>     <span class=o>=</span> <span class=s2>&#34;FailedDataOnly&#34;</span>
+</span></span><span class=line><span class=cl><span class=n>    access_key</span>         <span class=o>=</span> <span class=s2>&#34;a-really-long-and-scret-header-value&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=k>s3_configuration</span> {
+</span></span><span class=line><span class=cl><span class=n>      role_arn</span>           <span class=o>=</span> <span class=k>aws_iam_role</span><span class=p>.</span><span class=k>this</span><span class=p>.</span><span class=k>arn</span>
+</span></span><span class=line><span class=cl><span class=n>      bucket_arn</span>         <span class=o>=</span> <span class=k>aws_s3_bucket</span><span class=p>.</span><span class=k>this</span><span class=p>.</span><span class=k>arn</span>
+</span></span><span class=line><span class=cl>    }
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=k>request_configuration</span> {
+</span></span><span class=line><span class=cl><span class=n>      content_encoding</span> <span class=o>=</span> <span class=s2>&#34;NONE&#34;</span>
+</span></span><span class=line><span class=cl>    }
+</span></span><span class=line><span class=cl>  }
+</span></span><span class=line><span class=cl>}
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>resource</span> <span class=s2>&#34;aws_iam_role&#34; &#34;this&#34;</span> {
+</span></span><span class=line><span class=cl><span class=n>  name</span>        <span class=o>=</span> <span class=s2>&#34;grafana-agent&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=n>  assume_role_policy</span> <span class=o>=</span> <span class=err>&lt;&lt;</span><span class=k>POLICY</span>
+</span></span><span class=line><span class=cl>{
+</span></span><span class=line><span class=cl>  <span class=s2>&#34;Version&#34;: &#34;2012-10-17&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>  <span class=s2>&#34;Statement&#34;</span><span class=err>:</span> <span class=p>[</span>
+</span></span><span class=line><span class=cl>    {
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;Principal&#34;</span><span class=err>:</span> {
+</span></span><span class=line><span class=cl>        <span class=s2>&#34;Service&#34;: &#34;firehose.amazonaws.com&#34;</span>
+</span></span><span class=line><span class=cl>      }<span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;Action&#34;: &#34;sts:AssumeRole&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;Effect&#34;: &#34;Allow&#34;</span>
+</span></span><span class=line><span class=cl>    }
+</span></span><span class=line><span class=cl>  <span class=p>]</span>
+</span></span><span class=line><span class=cl>}
+</span></span><span class=line><span class=cl><span class=k>POLICY</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>}
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>data</span> <span class=s2>&#34;aws_iam_policy_document&#34; &#34;this&#34;</span> {
+</span></span><span class=line><span class=cl>  <span class=k>statement</span> {
+</span></span><span class=line><span class=cl><span class=n>    actions</span> <span class=o>=</span> <span class=p>[</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;s3:AbortMultipartUpload&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;s3:GetBucketLocation&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;s3:GetObject&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;s3:ListBucket&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;s3:ListBucketMultipartUploads&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;s3:PutObject&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=p>]</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=n>    resources</span> <span class=o>=</span> <span class=p>[</span>
+</span></span><span class=line><span class=cl>      <span class=k>aws_s3_bucket</span><span class=p>.</span><span class=k>this</span><span class=p>.</span><span class=k>arn</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>      <span class=s2>&#34;${aws_s3_bucket.this.arn}/*&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=p>]</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=n>    effect</span> <span class=o>=</span> <span class=s2>&#34;Allow&#34;</span>
+</span></span><span class=line><span class=cl>  }
+</span></span><span class=line><span class=cl>}
+</span></span></code></pre></div><p>Last step is to enable logging for <em>Fargate</em> pods in your EKS cluster.</p><p>Deploy this configmap to configure FluentBit on <em>Fargate</em>.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w></span><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>ConfigMap</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w></span><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>aws-logging</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>aws-observability</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w></span><span class=nt>data</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>flb_log_cw</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;false&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>filters.conf</span><span class=p>:</span><span class=w> </span><span class=p>|</span><span class=sd>
+</span></span></span><span class=line><span class=cl><span class=sd>    [FILTER]
+</span></span></span><span class=line><span class=cl><span class=sd>        Name                kubernetes
+</span></span></span><span class=line><span class=cl><span class=sd>        Match               kube.*
+</span></span></span><span class=line><span class=cl><span class=sd>        Merge_Log           On
+</span></span></span><span class=line><span class=cl><span class=sd>        Buffer_Size         0
+</span></span></span><span class=line><span class=cl><span class=sd>        Kube_Meta_Cache_TTL 300s</span><span class=w>    
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>output.conf</span><span class=p>:</span><span class=w> </span><span class=p>|</span><span class=sd>
+</span></span></span><span class=line><span class=cl><span class=sd>    [OUTPUT]
+</span></span></span><span class=line><span class=cl><span class=sd>        Name kinesis_firehose
+</span></span></span><span class=line><span class=cl><span class=sd>        Match *
+</span></span></span><span class=line><span class=cl><span class=sd>        region eu-west-1
+</span></span></span><span class=line><span class=cl><span class=sd>        delivery_stream grafana-agent</span><span class=w>    
+</span></span></span></code></pre></div><p>All done and you should see logs flowing in to Loki.</p><p>Two things that I noticed but never looked at was: clean up of log message and log timestamps.</p><p>Logs are batched through Firehose and Grafana Agent. So the timestamp that ends up in Loki will differ from the actual timestamp in each log line. So that could be something to look at and see what changes to Grafana Agent configuration can be made to make it more correct.</p><h2 id=references>References</h2><p>Documentation from Amazon on <a href=https://docs.aws.amazon.com/eks/latest/userguide/fargate-logging.html>Fargate logging</a>.</p><p>Repo for <a href=https://github.com/aws/aws-for-fluent-bit>aws-for-fluent-bit</a>.</p><p>Grafana Agent <a href=https://grafana.com/docs/agent/latest/flow/reference/components/>component reference</a>.</p></div></div><div class=footer><div class=footer-social><span class="social-icon social-icon-twitter"><a href=https://twitter.com/ehlomarcus title=twitter target=_blank rel=noopener><img src=/images/social/twitter.svg width=24 height=24 alt=twitter></a></span>
+<span class="social-icon social-icon-github"><a href=https://github.com/ehlomarcus/ title=github target=_blank rel=noopener><img src=/images/social/github.svg width=24 height=24 alt=github></a></span>
+<span class="social-icon social-icon-linkedin"><a href=https://linkedin.com/in/feltsen title=linkedin target=_blank rel=noopener><img src=/images/social/linkedin.svg width=24 height=24 alt=linkedin></a></span></div></div></div><script type=text/javascript src=/js/bundle.min.5993fcb11c07dea925a3fbd58c03c7f1857197c35fccce3aa963a12c0b3c9960.js></script></body></html>
